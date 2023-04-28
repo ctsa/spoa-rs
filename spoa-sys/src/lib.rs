@@ -20,6 +20,11 @@ pub mod ffi {
         type Graph;
 
         fn create_graph() -> UniquePtr<Graph>;
+
+        /// # Safety
+        /// this function is unsafe because cxx says pointer arguments are unsafe
+        unsafe fn clear(graph: Pin<&mut Graph>);
+
         /// # Safety
         /// this function is unsafe because cxx says pointer arguments are unsafe
         unsafe fn add_alignment(
@@ -30,11 +35,23 @@ pub mod ffi {
             quality: *const c_char,
             quality_len: u32,
         );
+
+        /// # Safety
+        /// this function is unsafe because cxx says pointer arguments are unsafe
+        unsafe fn add_alignment_noqual(
+            graph: Pin<&mut Graph>,
+            alignment: &Alignment,
+            sequence: *const c_char,
+            sequence_len: u32,
+        );
+
         fn generate_consensus(graph: Pin<&mut Graph>) -> UniquePtr<CxxString>;
         fn generate_multiple_sequence_alignment(
             graph: Pin<&mut Graph>,
             include_consensus: bool,
         ) -> UniquePtr<CxxVector<CxxString>>;
+
+        fn get_sequence_count(graph: &Graph) -> u32;
 
         fn create_alignment_engine(
             typ: AlignmentType,
@@ -45,6 +62,9 @@ pub mod ffi {
             q: i8,
             c: i8,
         ) -> UniquePtr<AlignmentEngine>;
+
+        fn create_alignment() -> UniquePtr<Alignment>;
+
         /// # Safety
         /// this function is unsafe because cxx says pointer arguments are unsafe
         unsafe fn align(
@@ -52,6 +72,11 @@ pub mod ffi {
             sequence: *const c_char,
             sequence_len: u32,
             graph: &Graph,
+            score: &mut i32,
         ) -> UniquePtr<Alignment>;
+
+        fn get_alignment_overlap_size(alignment: &Alignment) -> u32;
+
+        fn get_alignment_clip_size(alignment: &Alignment) -> i32;
     }
 }

@@ -6,6 +6,12 @@ pub use ffi::AlignmentType;
 /// An opaque struct containing an alignment of a sequence to a `Graph`
 pub struct Alignment(cxx::UniquePtr<ffi::Alignment>);
 
+impl Alignment {
+    /// Construct a new, empty `Alignment`. This is useful for adding the first sequence to a graph
+    pub fn new() -> Self {
+        Alignment(ffi::create_alignment())
+    }
+}
 /// An opaque struct for aligning sequences to a `Graph`
 pub struct AlignmentEngine(cxx::UniquePtr<ffi::AlignmentEngine>);
 
@@ -18,16 +24,19 @@ impl AlignmentEngine {
     }
 
     /// Align a `sequence` to a `graph`, returning an `Alignment`
-    pub fn align(&mut self, sequence: &CStr, graph: &Graph) -> Alignment {
+    pub fn align(&mut self, sequence: &CStr, graph: &Graph) -> (Alignment, i32) {
         let sequence_len = u32::try_from(sequence.to_bytes().len()).unwrap();
-        Alignment(unsafe {
+        let mut score = 0;
+        let aln = Alignment(unsafe {
             ffi::align(
                 self.0.pin_mut(),
                 sequence.as_ptr(),
                 sequence_len,
                 graph.0.as_ref().unwrap(),
+                &mut score,
             )
-        })
+        });
+        (aln, score)
     }
 }
 
@@ -38,6 +47,13 @@ impl Graph {
     /// Construct a new, empty `Graph`.
     pub fn new() -> Self {
         Graph(ffi::create_graph())
+    }
+
+    /// Clear graph
+    pub fn clear(&mut self) {
+        unsafe {
+            ffi::clear(self.0.pin_mut());
+        }
     }
 
     /// Add an `Alignment` to a `Graph`, along with its `sequence` and per-base `quality` scores.
@@ -56,6 +72,22 @@ impl Graph {
                 sequence_len,
                 quality.as_ptr(),
                 quality_len,
+            )
+        }
+    }
+
+    /// Add an `Alignment` to a `Graph`, along with its `sequence`
+    ///
+    /// The `alignment` should be derived from calling `AlignmentEngine::align` with the
+    /// `sequence`.
+    pub fn add_alignment_noqual(&mut self, alignment: &Alignment, sequence: &CStr) {
+        let sequence_len = u32::try_from(sequence.to_bytes().len()).unwrap();
+        unsafe {
+            ffi::add_alignment_noqual(
+                self.0.pin_mut(),
+                alignment.0.as_ref().unwrap(),
+                sequence.as_ptr(),
+                sequence_len,
             )
         }
     }
@@ -86,12 +118,28 @@ impl Graph {
         }
         result
     }
+
+    pub fn get_sequence_count(&self) -> u32 {
+        ffi::get_sequence_count(self.0.as_ref().unwrap())
+    }
 }
 
 impl Default for Graph {
     fn default() -> Self {
         Graph::new()
     }
+}
+
+/// Identify the number of read bases used in the alignment (subtracting any clipping on the left and right sides)
+///
+pub fn get_alignment_overlap_size(alignment: &Alignment) -> u32 {
+    ffi::get_alignment_overlap_size(alignment.0.as_ref().unwrap())
+}
+
+/// Return the read base index at the start of the alignment, or -1 if no aligned base can be found
+///
+pub fn get_alignment_clip_size(alignment: &Alignment) -> i32 {
+    ffi::get_alignment_clip_size(alignment.0.as_ref().unwrap())
 }
 
 #[cfg(test)]
@@ -113,6 +161,17 @@ mod tests {
         ]
     };
 
+    const PROG_SEQS: &[&CStr] = unsafe {
+        &[
+            CStr::from_bytes_with_nul_unchecked(b"ATTGCCCGTT\0"),
+            CStr::from_bytes_with_nul_unchecked(b"GCCGTTTGG\0"),
+            CStr::from_bytes_with_nul_unchecked(b"CGATGGCGT\0"),
+            CStr::from_bytes_with_nul_unchecked(b"CGTCGGCGTT\0"),
+            CStr::from_bytes_with_nul_unchecked(b"TGGCCTTACC\0"),
+            CStr::from_bytes_with_nul_unchecked(b"GCCATACCC\0"),
+        ]
+    };
+
     #[test]
     fn consensus_small() {
         let mut eng = AlignmentEngine::new(AlignmentType::kNW, 5, -4, -3, -1, -3, -1);
@@ -124,12 +183,80 @@ mod tests {
                 qual.push(0);
                 CString::from_vec_with_nul(qual).unwrap()
             };
-            let aln = eng.align(seq, &graph);
+            let (aln, _score) = eng.align(seq, &graph);
             graph.add_alignment(&aln, seq, &qual);
         }
 
         let consensus = graph.consensus();
         assert!(consensus.as_bytes() == b"AATGCCCGTT");
+    }
+
+    #[test]
+    fn consensus_small_noqual() {
+        let mut eng = AlignmentEngine::new(AlignmentType::kNW, 5, -4, -3, -1, -3, -1);
+        let mut graph = Graph::new();
+
+        for seq in SMALL_SEQS {
+            let (aln, _score) = eng.align(seq, &graph);
+            graph.add_alignment_noqual(&aln, seq);
+        }
+
+        let consensus = graph.consensus();
+        assert!(consensus.as_bytes() == b"AATGCCCGTT");
+    }
+
+    #[test]
+    fn test_get_sequence_count() {
+        let mut eng = AlignmentEngine::new(AlignmentType::kNW, 5, -4, -3, -1, -3, -1);
+        let mut graph = Graph::new();
+
+        for seq in SMALL_SEQS {
+            let qual = {
+                let mut qual = vec![34u8; seq.to_bytes().len()];
+                qual.push(0);
+                CString::from_vec_with_nul(qual).unwrap()
+            };
+            let (aln, _score) = eng.align(seq, &graph);
+            graph.add_alignment(&aln, seq, &qual);
+        }
+
+        assert_eq!(graph.get_sequence_count() as usize, SMALL_SEQS.len());
+    }
+
+    #[test]
+    fn test_alignment_overlap_size() {
+        let mut eng = AlignmentEngine::new(AlignmentType::kOV, 5, -4, -3, -1, -3, -1);
+        let mut graph = Graph::new();
+
+        let mut vals = Vec::new();
+        for seq in PROG_SEQS {
+            let (aln, _score) = eng.align(seq, &graph);
+            let val = get_alignment_overlap_size(&aln);
+            vals.push(val);
+            graph.add_alignment_noqual(&aln, seq);
+        }
+        assert_eq!(vals, vec![0, 6, 6, 9, 7, 8])
+    }
+
+    #[test]
+    fn test_alignment_clip_size() {
+        let mut eng = AlignmentEngine::new(AlignmentType::kSW, 1, -2, -3, -1, -3, -1);
+        let mut graph = Graph::new();
+
+        let mut vals = Vec::new();
+        for seq in PROG_SEQS.iter().rev() {
+            let (aln, _score) = eng.align(seq, &graph);
+            let val = get_alignment_clip_size(&aln);
+            vals.push(val);
+            graph.add_alignment_noqual(&aln, seq);
+        }
+        /*
+                let msa = graph.multiple_sequence_alignment(false);
+                for line in msa.iter() {
+                    println!("{:?}", line);
+                }
+        */
+        assert_eq!(vals, vec![-1, 2, 4, 3, 2, 5])
     }
 
     #[test]
@@ -144,7 +271,7 @@ mod tests {
 
         for record in reader {
             let record = record.unwrap();
-            let aln = eng.align(&record.seq, &graph);
+            let (aln, _score) = eng.align(&record.seq, &graph);
             graph.add_alignment(&aln, &record.seq, &record.qual);
         }
 
@@ -154,7 +281,7 @@ mod tests {
     }
 
     #[test]
-    fn msa_small() {
+    fn test_msa_small() {
         let mut eng = AlignmentEngine::new(AlignmentType::kNW, 5, -4, -3, -1, -3, -1);
         let mut graph = Graph::new();
 
@@ -164,7 +291,7 @@ mod tests {
                 qual.push(0);
                 CString::from_vec_with_nul(qual).unwrap()
             };
-            let aln = eng.align(seq, &graph);
+            let (aln, _score) = eng.align(seq, &graph);
             graph.add_alignment(&aln, seq, &qual);
         }
 
@@ -177,5 +304,21 @@ mod tests {
         assert!(msa[4].as_bytes() == b"AGTG-CTCGTT");
         assert!(msa[5].as_bytes() == b"AATG-CTCGTT");
         assert!(msa[6].as_bytes() == b"AATGCC-CGTT");
+    }
+
+    /// Verify how gap scoring works
+    #[test]
+    fn test_gap_scoring() {
+        let mut eng = AlignmentEngine::new(AlignmentType::kNW, 1, -4, -3, -2, -3, -2);
+        let mut graph = Graph::new();
+
+        let seq1 = unsafe { CStr::from_bytes_with_nul_unchecked(b"ATTGCCCGTT\0") };
+        let seq2 = unsafe { CStr::from_bytes_with_nul_unchecked(b"ATTGCCGTT\0") };
+
+        let (aln, _score) = eng.align(seq1, &graph);
+        graph.add_alignment_noqual(&aln, seq1);
+        let (_aln, score) = eng.align(seq2, &graph);
+
+        assert_eq!(score, 6);
     }
 }
