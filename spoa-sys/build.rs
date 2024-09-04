@@ -13,6 +13,7 @@ fn main() {
         .define("spoa_build_exe", "OFF")
         .define("spoa_build_tests", "OFF")
         .define("spoa_optimize_for_native", "OFF")
+        .define("spoa_optimize_for_portability", "ON")
         .define("spoa_use_simde", use_simde)
         .build();
     let lib64 = dst.join("lib64");
